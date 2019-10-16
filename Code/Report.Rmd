@@ -1,0 +1,234 @@
+---
+title: "Hacarus_CodingTest"
+author: "Jeffery"
+date: "2019/10/15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+Sys.setenv(JAVA_HOME='C:/Program Files/Java/jdk-13') # for 64-bit version JDK
+library(DT)
+library(xlsx)
+library(dplyr)
+library(caret)
+library(highcharter)
+
+DF1 <- read.xlsx('E:/git/CodingTest_hacarus/Data/Meal Analysis (2017) .xlsx',1)
+
+```
+
+## Data & Questions 
+
+We have about 1,300 meal records of 60 persons in the spreadsheet below. Each row indicates 1
+meal with several features like person profile, number of dishes, detail nutrients like amount of energy,
+carbo, fat, protein and so on. You can see score of each meal at the last "R" column. The score is
+from 1 to 4 and 1 indicates the worst and 4 does the best meal.
+Choose whichever features you like and can create any features from original ones to build the classifier.
+
+```{r data, echo=FALSE}
+
+df1 <- DF1[!is.na(DF1$NA.),]
+datatable(df1, options = list(dom = 'tp'), rownames = FALSE)
+
+```
+
+## Data preprocessing
+
+We can find some missing value at below table, hence do missing value check first.
+
+MissingValueCheck function: check the rate of missing value in data, if rate > 0.05, we need to do
+other preprocessing, else pass the checking process.
+
+```{r MissingValueCheck, results="markup"}
+MissingValueCheck <- function(DF){
+  df1 <- DF[!is.na(DF$NA.),]
+  df2 <- data.frame(all = nrow(df1),missing = colSums(is.na(df1)),ratio = colSums(is.na(df1))/nrow(df1))%>%
+    filter(ratio > 0.05)
+  if (nrow(df2) == 0){
+    check = 'Pass'
+  } else {
+    check = row.names(df2)
+  }
+  return(check)
+} 
+```
+
+
+## Modeling - randomforest
+
+Passed the data check, we start to calcualte and choose features : I choosed [Type, gender, age, height, weight, EER.kcal] from raw data and calcualted [avg.E,avg.P,avg.F,avg.C,avg.Salt,avg.Vegetables] which columns divided from dishes.
+
+```{r data create, echo=FALSE}
+df1 <- DF1 %>%
+  na.omit() %>%
+  rename(Score = Score.1.worst.2.bad.3.good.4.best.) %>%
+  mutate(avg.E = E.kcal./number.of.dishes,
+         avg.P = P.g./number.of.dishes,
+         avg.F = F.g./number.of.dishes,
+         avg.C = C.g./number.of.dishes,
+         avg.Salt = Salt.g./number.of.dishes,
+         avg.Vegetables = Vegetables.g./number.of.dishes,
+         Type = as.factor(Type),
+         gender = as.factor(gender),
+         Score = as.factor(Score)) %>%
+  select(Type,gender,age,height,weight,EER.kcal.,avg.E,avg.P,avg.F,avg.C,avg.Salt,avg.Vegetables,Score)
+datatable(df1, options = list(dom = 'tp'), rownames = FALSE)
+```
+
+Training and Validing dataset spilt to 70% and 30%, then using package 'caret' to build a randomforest model.
+
+```{r modeling, results="markup"}
+set.seed(36)
+train <- sample(nrow(df1), 0.7*nrow(df1), replace = FALSE)
+TrainSet <- df1[train,]
+ValidSet <- df1[-train,]
+
+model_rf <- caret::train(Score ~ .,
+                         data = TrainSet,
+                         method = "rf",
+                         preProcess = c("scale", "center"),
+                         trControl = trainControl(method = "repeatedcv", 
+                                                  number = 10, 
+                                                  repeats = 10, 
+                                                  verboseIter = FALSE))
+```
+
+## Valid result
+
+That's our predict result from ValidSet, and using the [correct answer]/[all predictors] to caculate the accuracy [0.74].  
+
+```{r valid, echo=FALSE}
+#ValidSetScore
+predValid <- predict(model_rf, ValidSet)
+table(predValid, ValidSet$Score)
+```
+
+## Result insight and discussion 1 - Class unbalanced problem
+
+From Raw data, we can find [scored 2] had 757 records are more then [scored 4] had 37. That causes our model will  not tend to preict [scored 4].
+
+For the Class unbalance problem we can using some resampling skill trying to modify our results. I used 'down' and 'smote' resampling methods. Down-sampling: randomly subset all the classes in the training set so that their class frequencies match the least prevalent class. For example, suppose that 80% of the training set samples are the first class and the remaining 20% are in the second class. Down-sampling would randomly sample the first class to be the same size as the second class (so that only 40% of the total training set is used to fit the model).SMOTE (Synthetic Minority Oversampling TEchnique) consists of synthesizing elements for the minority class, based on those that already exist. It works randomly picingk a point from the minority class and computing the k-nearest neighbors for this point. The synthetic points are added between the chosen point and its neighbors.
+
+```{r resampling, echo=FALSE}
+
+sampling <- function(sampling_methods){
+  ctrl <- trainControl(method = "repeatedcv", 
+                       number = 10, 
+                       repeats = 10, 
+                       verboseIter = FALSE,
+                       sampling = sampling_methods)
+  set.seed(36)
+  model_rf <- caret::train(Score ~ .,
+                                 data = TrainSet,
+                                 method = "rf",
+                                 preProcess = c("scale", "center"),
+                                 trControl = ctrl)
+  predValid <- predict(model_rf, ValidSet)
+  result <- table(predValid, ValidSet$Score)  
+  accuracy <- mean(predValid == ValidSet$Score) 
+  
+  return(list(model_rf,result,accuracy))
+} 
+
+Undersampling <-  sampling("down")
+SMOTE <-  sampling("smote")
+models <- list(original = model_rf,
+               down = Undersampling[[1]],
+               SMOTE = SMOTE[[1]])
+
+resampling <- resamples(models)
+bwplot(resampling)
+
+```
+
+```{r Undersampling, echo=FALSE}
+
+Undersampling[[2]]
+
+```
+
+
+```{r SMOTE, echo=FALSE}
+
+SMOTE[[2]]
+
+```
+Althought we modified the two resampling methods can increse the number of [class 4], their accuracy of 'down' is 0.52 and 'SMOTE' is 0.57. Both of then are lower than original methond. Maybe that can solve our prediction problem, but we still need to discus the balance of prdict require and accuracy.
+
+## Result insight and discussion 2 - feature importance
+```{r Imp, echo=FALSE}
+
+varImp(model_rf)
+
+
+```
+
+From the importance table of original model, we choose the [avg.Vegetables,avg.F,avg.Salt,avg.P,avg.C,avg.E] which importace over 30 then calculate their average.
+
+Train set:
+```{r TrainScore, echo=FALSE}
+
+TrainScore <- TrainSet%>%
+  group_by(Score) %>%
+  summarise(avg.Vegetables = mean(avg.Vegetables),avg.F=mean(avg.F),avg.Salt=mean(avg.Salt),avg.P=mean(avg.P),avg.C=mean(avg.C),avg.E=mean(avg.E))
+
+datatable(TrainScore, options = list(dom = 't'), rownames = FALSE)
+```
+Train set:
+```{r TrainScore plot, echo=FALSE}
+out <- data.frame()
+for (i in 2:ncol(TrainScore)) {
+  tmp <- TrainScore[,c(1,i)]
+  tmp$name <- names(tmp[,2])
+  names(tmp)[2] <- 'Value'
+  out <- bind_rows(out,tmp)
+}
+hchart(out, "column", hcaes(x = name, y = Value, group = Score))
+```
+Predict result:
+```{r ResultScore, echo=FALSE}
+
+result <- data.frame(ValidSet,predict = predValid)
+
+ResultScore <- result %>%
+  group_by(predict) %>%
+  summarise(avg.Vegetables = mean(avg.Vegetables),avg.F=mean(avg.F),avg.Salt=mean(avg.Salt),avg.P=mean(avg.P),avg.C=mean(avg.C),avg.E=mean(avg.E))
+
+datatable(ResultScore, options = list(dom = 't'), rownames = FALSE)
+```
+```{r ResultScore plot, echo=FALSE}
+out <- data.frame()
+for (i in 2:ncol(ResultScore)) {
+  tmp <- ResultScore[,c(1,i)]
+  tmp$name <- names(tmp[,2])
+  names(tmp)[2] <- 'Value'
+  out <- bind_rows(out,tmp)
+}
+hchart(out, "column", hcaes(x = name, y = Value, group = predict))
+```
+We can get some insights of below charts:
+1. How to get high score? More Vegetables, others are low. Especially we need to distinguish with [Score3] and [Score4]. The Vegetables of [Score3] and [Score4] is alomst the same, but others [Score4] are lower than  [Score3].
+2. Using randomforest modeling result will enhance the distinguishing of the Vegetables between each Scores. Others are also the same with Trainset when more lower get more higer Score.
+
+
+## Result insight and discussion 3 - Special Case
+```{r Special Case, echo=FALSE}
+tmp1 <- result %>%
+  filter(Score == '1' & predict == '4')
+datatable(tmp1, options = list(dom = 't'), rownames = FALSE)
+```
+
+In this Case, the Score of raw data should be 1, but our predition was 4. Check the data, we can find avg.Vegetables is 181.2 and avg.F is 0.52 which seems matched our model's criterions. That's why it predicted this case to Score4.
+
+##  What we can do next?
+From importance table, it showed us the human information features got lower importance([age, weight, height, gender]). Maybe we can think why human information will not effect our Score? Or maybe we need to do more features combine the infromation data with food components data.
+
+```{r Imp 2, echo=FALSE}
+
+varImp(model_rf)
+
+
+```
+
